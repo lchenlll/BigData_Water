@@ -10,24 +10,24 @@ import com.zaxxer.hikari.HikariConfig;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 
 
-public class ConnectData implements Configurable  {
-    private static final Logger log = LoggerFactory.getLogger(ConnectData.class);
-    @Getter
+@Getter
+public class SourceConfig implements Configurable  {
+    private static final Logger log = LoggerFactory.getLogger(SourceConfig.class);
     private String url;
-    @Getter
     private String username;
-    @Getter
     private String password;
-    @Getter
-    private String sleepInterval;
-    @Getter
+    private long sleepInterval;
     private String  tableName;
-    @Getter
     private Integer pageSize = 600;
+    private String zkConnect;
+    private String zkBasePath ;
+    private  int numShards ;
+    private long heartBeatInterval ;
+    private long ShardTimeout ;
+
     private static DataSource dataSource;
 
     /**
@@ -41,9 +41,14 @@ public class ConnectData implements Configurable  {
         url = context.getString("url");
         username = context.getString("username");
         password = context.getString("password");
-        sleepInterval = context.getString("sleepInterval");
+        sleepInterval = context.getLong("sleepInterval");
         tableName = context.getString("tableName");
         String pageSizeBack = context.getString("pageSize");
+        zkConnect = context.getString("zkConnect");
+        zkBasePath = context.getString("zkBasePath");
+        numShards = context.getInteger("numShards");
+        heartBeatInterval = context.getLong("heartBeatInterval",10000L);
+        ShardTimeout = context.getLong("ShardTimeout",30000L);
         if(pageSizeBack!=null){
             try{
                 pageSize = Integer.parseInt(pageSizeBack);
