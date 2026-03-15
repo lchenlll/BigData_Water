@@ -88,13 +88,16 @@ public class ZkShardManager {
         globalLock = new InterProcessMutex(zkClient, zkBasePath + "/lock");
         registerAgent();
         startHeartbeatTask();
+        startProgressPersistTask(); // 启动进度持久化任务
         log.info("ZkShardManager初始化完成");
     }
+
     private void createIfNotExists(String path, String data) throws Exception {
         if (zkClient.checkExists().forPath(path) == null) {
             zkClient.create().creatingParentsIfNeeded().forPath(path, data.getBytes());
         }
     }
+
     private void registerAgent() throws Exception {
         String agentPath = zkBasePath + "/nodes/" + zkServerId;
         JSONObject info = new JSONObject();
@@ -125,14 +128,14 @@ public class ZkShardManager {
             JSONObject shardInfo = JSON.parseObject(new String(data));
             JSONArray deviceArray = new JSONArray();
             deviceArray.addAll(shardDevices.get(i));
-            shardInfo.put("deviceIds", deviceArray);   // 统一字段名
+            shardInfo.put("deviceIds", deviceArray);
             zkClient.setData().forPath(shardPath, shardInfo.toJSONString().getBytes());
             log.info("分片 {} 分配设备: {}", i, shardDevices.get(i));
         }
     }
 
     /**
-     * 认领分片（仅在启动或重平衡时调用，心跳任务也会自动认领）
+     * 认领分片
      */
     public void claimShard() throws Exception {
         if (globalLock.acquire(5, TimeUnit.SECONDS)) {
@@ -179,23 +182,97 @@ public class ZkShardManager {
             log.warn("获取全局锁失败，无法认领分片");
         }
     }
-    public void updateDeviceProgress(int shardId, String deviceId, long ts,int key,String lastId) throws Exception {
+
+    /**
+     * 更新内存中某个设备的最后处理信息（精确比较 ts 和 id）
+     */
+    public void updateDeviceProgress(int shardId, String deviceId, long ts, int key, String lastId) {
         ShardInfo shard = ownerShards.get(shardId);
-        if(shard != null&&shard.active){
+        if (shard != null && shard.active) {
             DeviceProgress dp = shard.deviceProgress.computeIfAbsent(deviceId, k -> new DeviceProgress());
-            if(ts> dp.getLastTs()){
+            if (isNewer(ts, lastId, dp.getLastTs(), dp.getLastId())) {
                 dp.setLastTs(ts);
-                dp.setLastId(lastId);
                 dp.setLastKey(key);
+                dp.setLastId(lastId);
             }
-            if(ts> shard.lastTs){
+            // 更新分片全局 lastTs（取所有设备最大）
+            if (ts > shard.lastTs) {
                 shard.lastTs = ts;
             }
         }
     }
+    /**
+     * 获取指定分片下某个设备的最后处理时间戳（内存中）
+     */
+    public long getDeviceLastTs(int shardId, String deviceId) {
+        ShardInfo shard = ownerShards.get(shardId);
+        if (shard != null) {
+            DeviceProgress dp = shard.deviceProgress.get(deviceId);
+            return dp == null ? 0L : dp.getLastTs();
+        }
+        return 0L;
+    }
 
     /**
-     * 更新本节点所有分片的心跳（无需锁，只更新自己持有的）
+     * 判断新记录是否比旧记录更新
+     */
+    private boolean isNewer(long newTs, String newId, long oldTs, String oldId) {
+        if (newTs > oldTs) return true;
+        if (newTs < oldTs) return false;
+        // ts相等时比较id（假设id是数字字符串或字典序递增）
+        try {
+            long newNum = Long.parseLong(newId);
+            long oldNum = Long.parseLong(oldId);
+            return newNum > oldNum;
+        } catch (NumberFormatException e) {
+            // 非数字，按字符串字典序比较（需保证业务上递增）
+            return newId.compareTo(oldId) > 0;
+        }
+    }
+
+    /**
+     * 持久化指定分片的设备进度到 ZK
+     */
+    public void persistShardProgress(int shardId) {
+        ShardInfo shard = ownerShards.get(shardId);
+        if (shard == null) return;
+
+        String shardPath = zkBasePath + "/shards/shard_" + shardId;
+        try {
+            if (globalLock.acquire(5, TimeUnit.SECONDS)) {
+                try {
+                    byte[] data = zkClient.getData().forPath(shardPath);
+                    JSONObject shardInfo = JSON.parseObject(new String(data));
+
+                    // 将 deviceProgress 转为 JSON 对象
+                    JSONObject progressJson = new JSONObject();
+                    for (Map.Entry<String, DeviceProgress> entry : shard.deviceProgress.entrySet()) {
+                        JSONObject obj = new JSONObject();
+                        obj.put("lastTs", entry.getValue().getLastTs());
+                        obj.put("lastKey", entry.getValue().getLastKey());
+                        obj.put("lastId", entry.getValue().getLastId());
+                        progressJson.put(entry.getKey(), obj);
+                    }
+                    shardInfo.put("deviceProgress", progressJson);
+                    // 可选：更新分片全局 lastTs
+                    shardInfo.put("lastTs", shard.lastTs);
+                    shardInfo.put("lastHeartbeat", System.currentTimeMillis());
+
+                    zkClient.setData().forPath(shardPath, shardInfo.toJSONString().getBytes());
+                    log.debug("分片 {} 设备进度已持久化", shardId);
+                } finally {
+                    globalLock.release();
+                }
+            } else {
+                log.warn("获取全局锁失败，无法持久化分片 {} 进度", shardId);
+            }
+        } catch (Exception e) {
+            log.error("持久化分片 {} 进度时发生异常", shardId, e);
+        }
+    }
+
+    /**
+     * 更新本节点所有分片的心跳
      */
     public void updateHeartbeats() throws Exception {
         for (ShardInfo shard : ownerShards.values()) {
@@ -276,8 +353,25 @@ public class ZkShardManager {
     }
 
     /**
-     * 更新分片处理进度
+     * 启动进度持久化任务（每10秒执行一次）
      */
+    private void startProgressPersistTask() {
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                for (Integer shardId : ownerShards.keySet()) {
+                    persistShardProgress(shardId);
+                }
+            } catch (Exception e) {
+                log.error("持久化进度任务异常", e);
+            }
+        }, 10, 10, TimeUnit.SECONDS);
+        log.info("进度持久化任务已启动，间隔10秒");
+    }
+
+    /**
+     * 更新分片处理进度（保留旧方法，但已由设备级进度替代）
+     */
+    @Deprecated
     public void updateShardLastTs(int shardId, long lastTs) throws Exception {
         String path = zkBasePath + "/shards/shard_" + shardId;
         byte[] data = zkClient.getData().forPath(path);
@@ -314,21 +408,22 @@ public class ZkShardManager {
         }
         ownerShards.clear();
     }
-    private Map<String,DeviceProgress> loadDeviceProgress(int shardId) throws Exception {
-        String path = zkBasePath + "/shards/shard_" + shardId ;
+
+    private Map<String, DeviceProgress> loadDeviceProgress(int shardId) throws Exception {
+        String path = zkBasePath + "/shards/shard_" + shardId;
         byte[] data = zkClient.getData().forPath(path);
         JSONObject shardInfo = JSON.parseObject(new String(data));
-        JSONObject ProgressJson = shardInfo.getJSONObject("deviceProgress");
-        Map<String,DeviceProgress> deviceProgressMap = new ConcurrentHashMap<>();
-        if(ProgressJson != null){
-            for(String deviceId : ProgressJson.keySet()){
-               JSONObject obj = ProgressJson.getJSONObject(deviceId);
-               DeviceProgress dp = new DeviceProgress(
-                       obj.getLongValue("lastTs"),
-                       obj.getIntValue("lastKey"),
-                       obj.getString("lastId")
-               );
-               deviceProgressMap.put(deviceId,dp);
+        JSONObject progressJson = shardInfo.getJSONObject("deviceProgress");
+        Map<String, DeviceProgress> deviceProgressMap = new ConcurrentHashMap<>();
+        if (progressJson != null) {
+            for (String deviceId : progressJson.keySet()) {
+                JSONObject obj = progressJson.getJSONObject(deviceId);
+                DeviceProgress dp = new DeviceProgress(
+                        obj.getLongValue("lastTs"),
+                        obj.getIntValue("lastKey"),
+                        obj.getString("lastId")
+                );
+                deviceProgressMap.put(deviceId, dp);
             }
         }
         return deviceProgressMap;
@@ -360,8 +455,7 @@ public class ZkShardManager {
         long lastTs;
         volatile boolean active;
         long lastHeartbeat;
-        Map<String,DeviceProgress> deviceProgress;
-        public ShardInfo(){}
+        Map<String, DeviceProgress> deviceProgress;
 
         ShardInfo(int shardId, List<String> deviceIds, long lastTs, boolean active) {
             this.shardId = shardId;
@@ -370,22 +464,22 @@ public class ZkShardManager {
             this.active = active;
             this.lastHeartbeat = System.currentTimeMillis();
             this.deviceProgress = new ConcurrentHashMap<>();
-
         }
     }
+
     @Getter
     @Setter
     public static class DeviceProgress {
         private long lastTs;
         private int lastKey;
-        private String lastId;
-        public DeviceProgress(){}
+        private String lastId;  // 记录ID，可以是字符串（如复合主键拼接）
+
+        public DeviceProgress() {}
+
         public DeviceProgress(long lastTs, int lastKey, String lastId) {
             this.lastTs = lastTs;
             this.lastKey = lastKey;
             this.lastId = lastId;
-
         }
-
     }
 }
