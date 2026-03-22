@@ -1,37 +1,40 @@
 package study;
 
 import com.alibaba.fastjson.JSONObject;
-import org.apache.flume.Context;
-import org.apache.flume.Event;
+import org.apache.flume.*;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.event.SimpleEvent;
 import org.apache.flume.source.AbstractSource;
-import org.apache.flume.EventDeliveryException;
-import org.apache.flume.PollableSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 public class MysqlSource_get extends AbstractSource implements PollableSource, Configurable {
     private static final Logger log = LoggerFactory.getLogger(MysqlSource_get.class);
-    private static final long RETRY_INTERVAL_SECONDS = 10;
 
     private SourceConfig sourceConfig;
-    private ZkShardManager zkShardManager;
+    private ZkProgressManager zkProgressManager;
     private ExecutorService executorService;
-    private final Map<String, JSONObject> deviceCache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Integer, ShardContext> shardContexts = new ConcurrentHashMap<>();
     private final BlockingQueue<Event> queue = new LinkedBlockingQueue<>();
     private volatile boolean running = false;
     private final Util util = new Util();
+
+    private List<String> allDeviceIds;
+    // 每个设备的进度（内存缓存）
+    private final Map<String, DeviceProgress> deviceProgressMap = new ConcurrentHashMap<>();
+
+    private static class DeviceProgress {
+        long lastTs;
+        int lastKey;
+        DeviceProgress(long lastTs, int lastKey) {
+            this.lastTs = lastTs;
+            this.lastKey = lastKey;
+        }
+    }
 
     @Override
     public void configure(Context context) {
@@ -39,46 +42,28 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         sourceConfig.configure(context);
     }
 
-    private static class ShardContext {
-        final int shardId;
-        final List<String> deviceIds;
-        volatile long lastTs;
-        volatile boolean active;
-
-        ShardContext(int shardId, List<String> deviceIds, long lastTs) {
-            this.shardId = shardId;
-            this.deviceIds = Collections.unmodifiableList(deviceIds);
-            this.lastTs = lastTs;
-            this.active = true;
-        }
-    }
-
     @Override
     public synchronized void start() {
         super.start();
         running = true;
         try {
-            zkShardManager = new ZkShardManager(
+            zkProgressManager = new ZkProgressManager(
                     sourceConfig.getZkConnect(),
-                    sourceConfig.getZkBasePath(),
-                    sourceConfig.getNumShards(),
-                    sourceConfig.getHeartBeatInterval(),
-                    sourceConfig.getShardTimeout(),
-                    new ShardAssignmentCallbackImpl()
+                    sourceConfig.getZkBasePath()
             );
 
-            // 重要：初始化设备列表（从数据库查询或硬编码）
-            List<String> allDevices = loadAllDeviceIds();
-            if (allDevices.isEmpty()) {
+            allDeviceIds = loadAllDeviceIds();
+            if (allDeviceIds.isEmpty()) {
                 log.warn("No devices found, will not pull any data.");
-            } else {
-                zkShardManager.initializeShards(allDevices);
+                return;
             }
+            log.info("Loaded {} devices", allDeviceIds.size());
 
-            // 2. 认领分片（此时 ZK 中已有设备列表）
-            log.info("Before claimShard");
-            zkShardManager.claimShard();
-            log.info("After claimShard, shardContexts size: {}", shardContexts.size());
+            for (String deviceId : allDeviceIds) {
+                ZkProgressManager.Process progress = zkProgressManager.loadProgress(deviceId);
+                deviceProgressMap.put(deviceId, new DeviceProgress(progress.getLastTs(), progress.getLastKey()));
+                log.debug("Loaded progress for device {}: lastTs={}, lastKey={}", deviceId, progress.getLastTs(), progress.getLastKey());
+            }
 
             executorService = Executors.newSingleThreadExecutor();
             executorService.submit(this::pullDataLoop);
@@ -105,42 +90,16 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         return deviceIds;
     }
 
-    private List<String> getAllDeviceIds() {
-        List<String> deviceIds = new ArrayList<>();
-        String sql = "SELECT DISTINCT id FROM device";
-        try (Connection conn = sourceConfig.SqlgetConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                deviceIds.add(rs.getString(1));
-            }
-        } catch (SQLException e) {
-            log.error("Failed to load device IDs", e);
-        }
-        return deviceIds;
-    }
-
-    /**
-     * 数据拉取主循环：遍历所有活跃分片，每个分片内遍历设备，增量拉取数据
-     */
     private void pullDataLoop() {
-        log.info("shardContexts size: {}, devices: {}", shardContexts.size(),
-                shardContexts.values().stream().map(ctx -> ctx.deviceIds.size()).collect(Collectors.toList()));
         long loopInterval = sourceConfig.getSleepInterval();
         while (running) {
             try {
-                List<ShardContext> snapshot = new ArrayList<>(shardContexts.values());
-                if (snapshot.isEmpty()) {
-                    Thread.sleep(loopInterval);
-                    continue;
-                }
-
-                for (ShardContext ctx : snapshot) {
-                    if (!ctx.active || !running) continue;
+                for (String deviceId : allDeviceIds) {
+                    if (!running) break;
                     try {
-                        fetchDataForShard(ctx);
+                        fetchDataForDevice(deviceId);
                     } catch (Exception e) {
-                        log.error("Error fetching data for shard " + ctx.shardId, e);
+                        log.error("Error fetching data for device {}", deviceId, e);
                     }
                 }
                 Thread.sleep(loopInterval);
@@ -153,53 +112,62 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         }
     }
 
-    /**
-     * 为单个分片拉取数据：遍历分片内所有设备，对每个设备执行增量查询
-     */
-    private void fetchDataForShard(ShardContext ctx) throws Exception {
+    private void fetchDataForDevice(String deviceId) throws Exception {
+        DeviceProgress progress = deviceProgressMap.get(deviceId);
+        if (progress == null) return;
+
+        long lastTs = progress.lastTs;
+        int lastKey = progress.lastKey;
+
         String tableName = sourceConfig.getTableName();
         int pageSize = sourceConfig.getPageSize();
-        List<String> deviceIds = ctx.deviceIds;
-        if (deviceIds.isEmpty()) return;
 
-        for (String deviceId : deviceIds) {
-            long deviceLastTs = zkShardManager.getDeviceLastTs(ctx.shardId, deviceId);
+        String sql = "SELECT entity_id, ts, key, dbl_v, long_v FROM " + tableName
+                + " WHERE entity_id = CAST(? AS uuid) AND (ts > ? OR (ts = ? AND key > ?)) AND key IN (37,39) "
+                + " ORDER BY ts ASC, key ASC LIMIT ?";
 
-            String sql = "SELECT id, entity_id, ts, key, dbl_v, long_v FROM " + tableName
-                    + " WHERE entity_id = ? AND ts > ? AND (key =37 or key = 39) ORDER BY ts ASC, id ASC LIMIT ?";
+        try (Connection conn = sourceConfig.SqlgetConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
 
-            try (Connection conn = sourceConfig.SqlgetConnection();
-                 PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, deviceId);
+            pstmt.setLong(2, lastTs);
+            pstmt.setLong(3, lastTs);
+            pstmt.setInt(4, lastKey);
+            pstmt.setInt(5, pageSize);
 
-                pstmt.setString(1, deviceId);
-                pstmt.setLong(2, deviceLastTs);
-                pstmt.setInt(3, pageSize);
+            long maxTs = lastTs;
+            int maxKey = lastKey;
 
-                long maxTsForDevice = deviceLastTs;
-
-                try (ResultSet rs = pstmt.executeQuery()) {
-                    while (rs.next()) {
-                        long ts = rs.getLong("ts");
-                        if (ts > maxTsForDevice) {
-                            maxTsForDevice = ts;
-                        }
-                        processRow(conn, rs, ctx.shardId);
+            try (ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    long ts = rs.getLong("ts");
+                    int key = rs.getInt("key");
+                    if (isNewer(ts, key, maxTs, maxKey)) {
+                        maxTs = ts;
+                        maxKey = key;
                     }
+                    processRow(conn, rs);
                 }
+            }
 
-                // 更新分片全局 lastTs（可选）
-                if (maxTsForDevice > ctx.lastTs) {
-                    ctx.lastTs = maxTsForDevice;
-                }
+            // 如果该设备有新数据，更新内存和ZK
+            if (maxTs > lastTs || (maxTs == lastTs && maxKey > lastKey)) {
+                progress.lastTs = maxTs;
+                progress.lastKey = maxKey;
+                // 持久化到 ZK
+                zkProgressManager.saveProgress(deviceId, maxTs, maxKey);
+                log.debug("Device {} progress updated to lastTs={}, lastKey={}", deviceId, maxTs, maxKey);
             }
         }
     }
 
-    /**
-     * 处理单行数据，生成事件并更新设备进度
-     */
-    private void processRow(Connection conn, ResultSet rs, int shardId) throws SQLException {
-        long id = rs.getLong("id");
+    private boolean isNewer(long ts, int key, long maxTs, int maxKey) {
+        if (ts > maxTs) return true;
+        if (ts < maxTs) return false;
+        return key > maxKey;
+    }
+
+    private void processRow(Connection conn, ResultSet rs) throws SQLException {
         String entityId = rs.getString("entity_id");
         int key = rs.getInt("key");
         long ts = rs.getLong("ts");
@@ -209,7 +177,6 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         jsonObject.put("tk_id", entityId);
         jsonObject.put("ts", ts);
         jsonObject.put("key", key);
-        jsonObject.put("recordId", id); // 可选，便于下游使用
 
         if (key == 37) {
             if (rs.getObject("long_v") != null) {
@@ -235,28 +202,6 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
             log.warn("Interrupted while putting event into queue");
             Thread.currentThread().interrupt();
         }
-
-        // 更新设备进度到 ZK 管理器（内存）
-        zkShardManager.updateDeviceProgress(shardId, entityId, ts, key, String.valueOf(id));
-    }
-
-    // ZK 分片回调实现
-    private class ShardAssignmentCallbackImpl implements ZkShardManager.ShardAssignmentCallback {
-        @Override
-        public void onShardAssigned(int shardId, List<String> deviceIds, long lastTs) {
-            log.info("Shard assigned: {}, devices: {}, lastTs: {}", shardId, deviceIds.size(), lastTs);
-            shardContexts.put(shardId, new ShardContext(shardId, deviceIds, lastTs));
-        }
-
-        @Override
-        public void onShardUnassigned(int shardId) {
-            log.info("Shard unassigned: {}", shardId);
-            ShardContext ctx = shardContexts.get(shardId);
-            if (ctx != null) {
-                ctx.active = false;
-                shardContexts.remove(shardId);
-            }
-        }
     }
 
     @Override
@@ -271,24 +216,20 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     }
 
     @Override
-    public long getBackOffSleepIncrement() {
-        return 0;
-    }
+    public long getBackOffSleepIncrement() { return 0; }
 
     @Override
-    public long getMaxBackOffSleepInterval() {
-        return 0;
-    }
+    public long getMaxBackOffSleepInterval() { return 0; }
 
     @Override
     public synchronized void stop() {
         running = false;
-        if (zkShardManager != null) {
+        if (zkProgressManager != null) {
             try {
-                zkShardManager.releaseAllShards();
-                zkShardManager.close();
+                // 最后持久化一次（可选，定时任务已做）
+                zkProgressManager.close;
             } catch (Exception e) {
-                log.error("Error closing ZkShardManager", e);
+                log.error("Error closing ZkProgressManager", e);
             }
         }
         if (executorService != null) {

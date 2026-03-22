@@ -27,6 +27,16 @@
             <version>1.9.0</version>
         </dependency>
         <dependency>
+            <groupId>org.apache.flume</groupId>
+            <artifactId>flume-ng-node</artifactId>
+            <version>1.9.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.6.0</version>
+        </dependency>
+        <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>fastjson</artifactId>
             <version>1.2.62</version>
@@ -35,6 +45,48 @@
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
             <version>20210307</version>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>RELEASE</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.codacy</groupId>
+            <artifactId>scooby-doo-fwk</artifactId>
+            <version>3.30.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.liferay</groupId>
+            <artifactId>org.powermock.modules.junit4</artifactId>
+            <version>1.5.6.LIFERAY-PATCHED-1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>5.0.1</version>
+     </dependency>
+        <dependency>
+            <groupId>org.apache.curator</groupId>
+            <artifactId>curator-framework</artifactId>
+            <version>5.5.0</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>zookeeper</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+            <version>3.5.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.curator</groupId>
+            <artifactId>curator-recipes</artifactId>
+            <version>5.5.0</version>
         </dependency>
     </dependencies>
 </project>

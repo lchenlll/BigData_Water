@@ -2,6 +2,7 @@ package study;
 
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.Getter;
+import lombok.Setter;
 import org.apache.flume.Context;
 import org.apache.flume.conf.Configurable;
 import org.slf4j.Logger;
@@ -14,6 +15,7 @@ import java.sql.SQLException;
 
 
 @Getter
+@Setter
 public class SourceConfig implements Configurable  {
     private static final Logger log = LoggerFactory.getLogger(SourceConfig.class);
     private String url;
@@ -39,7 +41,7 @@ public class SourceConfig implements Configurable  {
     @Override
     public void configure(Context context) {
         url = context.getString("url");
-        username = context.getString("username");
+        username = context.getString("user");
         password = context.getString("password");
         sleepInterval = context.getLong("sleepInterval");
         tableName = context.getString("tableName");
