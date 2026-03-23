@@ -37,7 +37,7 @@ public class ZkProgressManager {
      * @param deviceId
      * @param LastKey
      */
-    public void saveProgress(String LastTs,String deviceId,String LastKey) throws Exception {
+    public void saveProgress(Long LastTs,String deviceId,int LastKey) throws Exception {
        String path = progressPath+"/"+deviceId;
         JSONObject data = new JSONObject();
         data.put("LastTs",LastTs);
