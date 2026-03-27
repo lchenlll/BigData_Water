@@ -20,6 +20,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     private ZkProgressManager zkProgressManager;
     private ExecutorService executorService;
     private final BlockingQueue<Event> queue = new LinkedBlockingQueue<>();
+    private final Map<String, JSONObject> deviceCache = new ConcurrentHashMap<>();
     private volatile boolean running = false;
     private final Util util = new Util();
 
@@ -115,6 +116,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     private void fetchDataForDevice(String deviceId) throws Exception {
         DeviceProgress progress = deviceProgressMap.get(deviceId);
         if (progress == null) return;
+        log.info("Fetching data for device: {}", deviceId);
 
         long lastTs = progress.lastTs;
         int lastKey = progress.lastKey;
@@ -136,27 +138,25 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
             pstmt.setInt(5, pageSize);
 
             long maxTs = lastTs;
-            int maxKey = lastKey;
+            int LastKey = lastKey;
 
             try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                     long ts = rs.getLong("ts");
                     int key = rs.getInt("key");
-                    if (isNewer(ts, key, maxTs, maxKey)) {
+                    if (isNewer(ts, key, maxTs, LastKey)) {
                         maxTs = ts;
-                        maxKey = key;
+                        LastKey = key;
                     }
                     processRow(conn, rs);
                 }
             }
-
-            // 如果该设备有新数据，更新内存和ZK
-            if (maxTs > lastTs || (maxTs == lastTs && maxKey > lastKey)) {
+            if (maxTs > lastTs || (maxTs == lastTs && LastKey != lastKey)) {
                 progress.lastTs = maxTs;
-                progress.lastKey = maxKey;
+                progress.lastKey = LastKey;
                 // 持久化到 ZK
-                zkProgressManager.saveProgress(deviceId, maxTs, maxKey);
-                log.debug("Device {} progress updated to lastTs={}, lastKey={}", deviceId, maxTs, maxKey);
+                zkProgressManager.saveProgress(maxTs, deviceId, LastKey);
+                log.debug("Device {} progress updated to lastTs={}, lastKey={}", deviceId, maxTs, LastKey);
             }
         }
     }
@@ -226,8 +226,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         running = false;
         if (zkProgressManager != null) {
             try {
-                // 最后持久化一次（可选，定时任务已做）
-                zkProgressManager.close;
+                zkProgressManager.close();
             } catch (Exception e) {
                 log.error("Error closing ZkProgressManager", e);
             }

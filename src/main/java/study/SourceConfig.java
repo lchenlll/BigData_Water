@@ -48,9 +48,6 @@ public class SourceConfig implements Configurable  {
         String pageSizeBack = context.getString("pageSize");
         zkConnect = context.getString("zkConnect");
         zkBasePath = context.getString("zkBasePath");
-        numShards = context.getInteger("numShards");
-        heartBeatInterval = context.getLong("heartBeatInterval",10000L);
-        ShardTimeout = context.getLong("ShardTimeout",30000L);
         if(pageSizeBack!=null){
             try{
                 pageSize = Integer.parseInt(pageSizeBack);

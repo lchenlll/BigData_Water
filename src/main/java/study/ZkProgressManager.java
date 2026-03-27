@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSONObject;
 import lombok.Getter;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,15 +16,31 @@ public class ZkProgressManager {
     private final String progressPath;
 
     public ZkProgressManager(String zkConnect, String zkBasePath) throws Exception {
-       zkClient = CuratorFrameworkFactory.newClient(zkConnect, 5000, 5000, null);
-       zkClient.start();
-       if(!zkClient.blockUntilConnected(30, TimeUnit.MILLISECONDS)){
-           throw new RuntimeException("zk连接失败");
-       }
-       log.info("zk连接成功");
-       createIfNotExists(zkBasePath);
-       this.progressPath = zkBasePath+"/progress";
-       createIfNotExists(progressPath);
+        ExponentialBackoffRetry retryPolicy = new ExponentialBackoffRetry(1000, 3);
+        zkClient = CuratorFrameworkFactory.builder()
+                .connectString(zkConnect)
+                .sessionTimeoutMs(5000)
+                .connectionTimeoutMs(5000)
+                .retryPolicy(retryPolicy)
+                .build();
+        zkClient.start();
+
+        // 等待连接，最多 30 秒
+        boolean connected = zkClient.blockUntilConnected(30, TimeUnit.SECONDS);
+        if (!connected) {
+            // 即使 blockUntilConnected 返回 false，也可能已经连接，再检查一次
+            if (zkClient.getZookeeperClient().isConnected()) {
+                log.info("ZK 连接成功（虽然 blockUntilConnected 超时）");
+            } else {
+                throw new RuntimeException("ZK 连接超时");
+            }
+        } else {
+            log.info("ZK 连接成功");
+        }
+
+        createIfNotExists(zkBasePath);
+        this.progressPath = zkBasePath + "/progress";
+        createIfNotExists(progressPath);
     }
 
     private void createIfNotExists(String progressPath) throws Exception {
@@ -37,7 +54,7 @@ public class ZkProgressManager {
      * @param deviceId
      * @param LastKey
      */
-    public void saveProgress(String LastTs,String deviceId,String LastKey) throws Exception {
+    public void saveProgress(Long LastTs,String deviceId,int LastKey) throws Exception {
        String path = progressPath+"/"+deviceId;
         JSONObject data = new JSONObject();
         data.put("LastTs",LastTs);
