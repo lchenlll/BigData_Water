@@ -1,4 +1,4 @@
-package study;
+package Te;
 
 import com.alibaba.fastjson.JSONObject;
 import org.slf4j.Logger;
@@ -8,7 +8,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -17,19 +16,11 @@ import java.util.Map;
 
 public class Util {
      private static final Logger log = LoggerFactory.getLogger(Util.class);
-     /**
-     * 获取设备信息
-     * @param entityId 设备ID
-     * @param connect 数据库连接
-     * @param deviceCache 设备信息缓存
-     * @return 设备信息JSON对象
-     */
      public JSONObject GetdeviceInfo(String entityId, Connection connect, Map<String, JSONObject> deviceCache) {
          JSONObject deviceInfoStr = deviceCache.get(entityId);
          if (deviceInfoStr != null) {
              return deviceInfoStr;
          }
-         // 修正 SQL，添加空格
          String query = "SELECT d.alias, d.sn, t.title " +
                  "FROM device AS d " +
                  "INNER JOIN tenant AS t ON d.tenant_id = t.id " +
@@ -46,7 +37,6 @@ public class Util {
                      return deviceInfoStr;
                  }
                  log.warn("Device with id {} not found in database.", entityId);
-                 // 可选：缓存空对象，避免重复查询
                  JSONObject empty = new JSONObject();
                  deviceCache.put(entityId, empty);
                  return empty;

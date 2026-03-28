@@ -1,4 +1,4 @@
-package study;
+package Te;
 
 import com.alibaba.fastjson.JSONObject;
 import lombok.Getter;
@@ -24,18 +24,15 @@ public class ZkProgressManager {
                 .retryPolicy(retryPolicy)
                 .build();
         zkClient.start();
-
-        // 等待连接，最多 30 秒
         boolean connected = zkClient.blockUntilConnected(30, TimeUnit.SECONDS);
         if (!connected) {
-            // 即使 blockUntilConnected 返回 false，也可能已经连接，再检查一次
             if (zkClient.getZookeeperClient().isConnected()) {
-                log.info("ZK 连接成功（虽然 blockUntilConnected 超时）");
+                log.info("ZK full");
             } else {
-                throw new RuntimeException("ZK 连接超时");
+                throw new RuntimeException("ZK outTime");
             }
         } else {
-            log.info("ZK 连接成功");
+            log.info("ZK ok");
         }
 
         createIfNotExists(zkBasePath);
@@ -48,12 +45,6 @@ public class ZkProgressManager {
             zkClient.create().creatingParentsIfNeeded().forPath(progressPath);
         }
     }
-    /**
-     * 保存进度
-     * @param LastTs
-     * @param deviceId
-     * @param LastKey
-     */
     public void saveProgress(Long LastTs,String deviceId,int LastKey) throws Exception {
        String path = progressPath+"/"+deviceId;
         JSONObject data = new JSONObject();
@@ -64,7 +55,7 @@ public class ZkProgressManager {
         }else {
             zkClient.setData().forPath(path,data.toJSONString().getBytes());
         }
-        log.info("保存进度成功：{}",data);
+        log.info("ok：{}",data);
    }
    /*
      加载进度

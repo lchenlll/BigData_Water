@@ -1,16 +1,22 @@
-package study;
+package Te;
 
 import com.alibaba.fastjson.JSONObject;
-import org.apache.flume.*;
+import org.apache.flume.Context;
+import org.apache.flume.Event;
+import org.apache.flume.EventDeliveryException;
+import org.apache.flume.PollableSource;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.event.SimpleEvent;
 import org.apache.flume.source.AbstractSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 public class MysqlSource_get extends AbstractSource implements PollableSource, Configurable {
@@ -20,11 +26,11 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     private ZkProgressManager zkProgressManager;
     private ExecutorService executorService;
     private final BlockingQueue<Event> queue = new LinkedBlockingQueue<>();
+    private final Map<String, JSONObject> deviceCache = new ConcurrentHashMap<>();
     private volatile boolean running = false;
     private final Util util = new Util();
 
     private List<String> allDeviceIds;
-    // 每个设备的进度（内存缓存）
     private final Map<String, DeviceProgress> deviceProgressMap = new ConcurrentHashMap<>();
 
     private static class DeviceProgress {
@@ -76,7 +82,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     }
     private List<String> loadAllDeviceIds() {
         List<String> deviceIds = new ArrayList<>();
-        String sql = "SELECT DISTINCT entity_id FROM " + sourceConfig.getTableName();
+        String sql = "SELECT DISTINCT entity_id FROM device" ;
         try (Connection conn = sourceConfig.SqlgetConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
@@ -115,6 +121,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
     private void fetchDataForDevice(String deviceId) throws Exception {
         DeviceProgress progress = deviceProgressMap.get(deviceId);
         if (progress == null) return;
+        log.info("Fetching data for device: {}", deviceId);
 
         long lastTs = progress.lastTs;
         int lastKey = progress.lastKey;
@@ -136,27 +143,25 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
             pstmt.setInt(5, pageSize);
 
             long maxTs = lastTs;
-            int maxKey = lastKey;
+            int LastKey = lastKey;
 
             try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                     long ts = rs.getLong("ts");
                     int key = rs.getInt("key");
-                    if (isNewer(ts, key, maxTs, maxKey)) {
+                    if (isNewer(ts, key, maxTs, LastKey)) {
                         maxTs = ts;
-                        maxKey = key;
+                        LastKey = key;
                     }
                     processRow(conn, rs);
                 }
             }
-
-            // 如果该设备有新数据，更新内存和ZK
-            if (maxTs > lastTs || (maxTs == lastTs && maxKey > lastKey)) {
+            if (maxTs > lastTs || (maxTs == lastTs && LastKey != lastKey)) {
                 progress.lastTs = maxTs;
-                progress.lastKey = maxKey;
+                progress.lastKey = LastKey;
                 // 持久化到 ZK
-                zkProgressManager.saveProgress(deviceId, maxTs, maxKey);
-                log.debug("Device {} progress updated to lastTs={}, lastKey={}", deviceId, maxTs, maxKey);
+                zkProgressManager.saveProgress(maxTs, deviceId, LastKey);
+                log.debug("Device {} progress updated to lastTs={}, lastKey={}", deviceId, maxTs, LastKey);
             }
         }
     }
@@ -193,8 +198,17 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         }
 
         util.TsChange(ts, jsonObject);
-
+        String title = jsonObject.getString("title");
         Event event = new SimpleEvent();
+        String topic;
+        if(title.equals("Chuanbei")){
+            topic = "db_CBei";
+        }else if(title.equals("jiangxifei")){
+            topic = "db_JiangXi";
+        }else {
+            topic = "db_Other";
+        }
+        event.getHeaders().put("topic", topic);
         event.setBody(jsonObject.toString().getBytes(StandardCharsets.UTF_8));
         try {
             queue.put(event);
@@ -226,8 +240,7 @@ public class MysqlSource_get extends AbstractSource implements PollableSource, C
         running = false;
         if (zkProgressManager != null) {
             try {
-                // 最后持久化一次（可选，定时任务已做）
-                zkProgressManager.close;
+                zkProgressManager.close();
             } catch (Exception e) {
                 log.error("Error closing ZkProgressManager", e);
             }

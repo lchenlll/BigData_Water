@@ -1,5 +1,6 @@
-package study;
+package Te;
 
+import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.Getter;
 import lombok.Setter;
@@ -7,7 +8,6 @@ import org.apache.flume.Context;
 import org.apache.flume.conf.Configurable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.zaxxer.hikari.HikariConfig;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -31,13 +31,6 @@ public class SourceConfig implements Configurable  {
     private long ShardTimeout ;
 
     private static DataSource dataSource;
-
-    /**
-     * 配置方法，用于初始化数据库连接相关的配置参数
-     * 从上下文环境中获取必要的连接信息和配置参数
-     *
-     * @param context 配置上下文对象，包含数据库连接所需的各项参数
-     */
     @Override
     public void configure(Context context) {
         url = context.getString("url");
@@ -72,7 +65,7 @@ public class SourceConfig implements Configurable  {
         try {
             return dataSource.getConnection();
         }catch (SQLException e){
-            log.error("数据库连接失败",e);
+            log.error("no",e);
             throw e;
         }
     }
